@@ -1,10 +1,25 @@
 #pragma once
 
+#include <mutex>
+#include <chrono>
+#include <cstdint>
+#include <string>
+#include <map>
+
 #include "Types.h"
 #include "param.h"
 #include "FSM/BaseState.h"
 #include "isaaclab/devices/keyboard/keyboard.h"
 #include "unitree_joystick_dsl.hpp"
+
+struct VirtualJoystick
+{
+    uint32_t keys = 0;
+    float lx = 0.0f;
+    float ly = 0.0f;
+    float rx = 0.0f;
+    float ry = 0.0f;
+};
 
 class FSMState : public BaseState
 {
@@ -35,9 +50,29 @@ public:
                 unitree::common::dsl::Parser p(condition);
                 auto ast = p.Parse();
                 auto func = unitree::common::dsl::Compile(*ast);
+
                 registered_checks.emplace_back(
                     std::make_pair(
-                        [func]()->bool{ return func(FSMState::lowstate->joystick); },
+                        [func, condition]()->bool
+                        {
+                            // 1. First try virtual joystick.
+                            if (FSMState::virtual_joystick_is_fresh())
+                            {
+                                auto joy = FSMState::get_virtual_joystick();
+
+                                if (FSMState::virtual_condition_match(condition, joy))
+                                {
+                                    return true;
+                                }
+
+                                // If virtual joystick is active, do not also let stale/physical
+                                // joystick accidentally trigger transitions.
+                                return false;
+                            }
+
+                            // 2. Fallback to original physical/MuJoCo joystick path.
+                            return func(FSMState::lowstate->joystick);
+                        },
                         fsm_id
                     )
                 );
@@ -67,4 +102,25 @@ public:
     static std::unique_ptr<LowCmd_t> lowcmd;
     static std::shared_ptr<LowState_t> lowstate;
     static std::shared_ptr<Keyboard> keyboard;
+
+    static std::mutex virtual_joystick_mutex;
+    static VirtualJoystick virtual_joystick;
+    static std::chrono::steady_clock::time_point virtual_joystick_stamp;
+    static bool virtual_joystick_enabled;
+
+    static void set_virtual_joystick(
+        uint32_t keys,
+        float lx,
+        float ly,
+        float rx,
+        float ry
+    );
+
+    static VirtualJoystick get_virtual_joystick();
+    static bool virtual_joystick_is_fresh();
+
+    static bool virtual_condition_match(
+        const std::string& condition,
+        const VirtualJoystick& joy
+    );
 };
