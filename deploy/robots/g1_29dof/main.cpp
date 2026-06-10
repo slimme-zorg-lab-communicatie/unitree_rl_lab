@@ -61,7 +61,11 @@ static std::string normalize_condition(std::string s)
             s.end(),
             [](unsigned char c)
             {
-                return std::isspace(c) || c == '[' || c == ']' || c == '(' || c == ')';
+                return std::isspace(c) ||
+                       c == '[' ||
+                       c == ']' ||
+                       c == '(' ||
+                       c == ')';
             }
         ),
         s.end()
@@ -112,44 +116,68 @@ bool FSMState::virtual_condition_match(
     const VirtualJoystick& joy
 )
 {
-    spdlog::info("checking virtual condition='{}' keys={}", condition, joy.keys);
     const std::string c = normalize_condition(condition);
 
-    // These cover the transitions printed in main.cpp:
-    // [L2 + Up] -> FixStand
-    // [R1 + X]  -> RL / Velocity control
+    const uint32_t keys = joy.keys;
 
+    auto down = [&](uint32_t button) {
+        return (keys & button) != 0;
+    };
+
+    auto combo = [&](uint32_t a, uint32_t b) {
+        return down(a) && down(b);
+    };
+
+    // Passive -> FixStand:
+    // LT + up.on_pressed
     if (
-        c.find("l2") != std::string::npos &&
+        c.find("lt") != std::string::npos &&
         c.find("up") != std::string::npos
     )
     {
-        return has_buttons(joy.keys, BTN_L2 | BTN_UP);
+        return combo(BTN_L2, BTN_UP);
     }
 
+    // FixStand / Velocity / Mimic -> Passive:
+    // LT + B.on_pressed
     if (
-        c.find("r1") != std::string::npos &&
+        c.find("lt") != std::string::npos &&
+        c.find("b") != std::string::npos
+    )
+    {
+        return combo(BTN_L2, BTN_B);
+    }
+
+    // FixStand / Mimic -> Velocity:
+    // RB + X.on_pressed
+    if (
+        c.find("rb") != std::string::npos &&
         c.find("x") != std::string::npos
     )
     {
-        return has_buttons(joy.keys, BTN_R1 | BTN_X);
+        return combo(BTN_R1, BTN_X);
     }
 
-    // Optional: add more known combos here if your FSM YAML uses them.
+    // Velocity -> Mimic_Dance_102:
+    // LT(2s) + down.on_pressed
+    // Timing is ignored for now; this just checks LT + DOWN.
     if (
-        c.find("l2") != std::string::npos &&
+        c.find("lt") != std::string::npos &&
         c.find("down") != std::string::npos
     )
     {
-        return has_buttons(joy.keys, BTN_L2 | BTN_DOWN);
+        return combo(BTN_L2, BTN_DOWN);
     }
 
+    // Velocity -> Mimic_Gangnam_Style:
+    // LT(2s) + left.on_pressed
+    // Timing is ignored for now; this just checks LT + LEFT.
     if (
-        c.find("r1") != std::string::npos &&
-        c.find("a") != std::string::npos
+        c.find("lt") != std::string::npos &&
+        c.find("left") != std::string::npos
     )
     {
-        return has_buttons(joy.keys, BTN_R1 | BTN_A);
+        return combo(BTN_L2, BTN_LEFT);
     }
 
     return false;
