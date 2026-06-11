@@ -11,15 +11,7 @@
 #include "FSM/BaseState.h"
 #include "isaaclab/devices/keyboard/keyboard.h"
 #include "unitree_joystick_dsl.hpp"
-
-struct VirtualJoystick
-{
-    uint32_t keys = 0;
-    float lx = 0.0f;
-    float ly = 0.0f;
-    float rx = 0.0f;
-    float ry = 0.0f;
-};
+#include <unitree/dds_wrapper/common/unitree_joystick.hpp>
 
 class FSMState : public BaseState
 {
@@ -53,24 +45,13 @@ public:
 
                 registered_checks.emplace_back(
                     std::make_pair(
-                        [func, condition]()->bool
+                        [func]()->bool
                         {
-                            // 1. First try virtual joystick.
                             if (FSMState::virtual_joystick_is_fresh())
                             {
-                                auto joy = FSMState::get_virtual_joystick();
-
-                                if (FSMState::virtual_condition_match(condition, joy))
-                                {
-                                    return true;
-                                }
-
-                                // If virtual joystick is active, do not also let stale/physical
-                                // joystick accidentally trigger transitions.
-                                return false;
+                                return func(FSMState::get_virtual_joystick());
                             }
 
-                            // 2. Fallback to original physical/MuJoCo joystick path.
                             return func(FSMState::lowstate->joystick);
                         },
                         fsm_id
@@ -103,10 +84,45 @@ public:
     static std::shared_ptr<LowState_t> lowstate;
     static std::shared_ptr<Keyboard> keyboard;
 
-    static std::mutex virtual_joystick_mutex;
-    static VirtualJoystick virtual_joystick;
-    static std::chrono::steady_clock::time_point virtual_joystick_stamp;
-    static bool virtual_joystick_enabled;
+    static inline std::mutex virtual_joystick_mutex;
+    static inline unitree::common::UnitreeJoystick virtual_joystick;
+    static inline std::chrono::steady_clock::time_point virtual_joystick_stamp =
+        std::chrono::steady_clock::now() - std::chrono::seconds(10);
+    static inline bool virtual_joystick_enabled = false;
+
+    static void update_unitree_joystick_from_wireless(
+        unitree::common::UnitreeJoystick& joy,
+        uint32_t keys,
+        float lx,
+        float ly,
+        float rx,
+        float ry
+    )
+    {
+        unitree::common::BtnUnion btn{};
+        btn.value = static_cast<uint16_t>(keys & 0xFFFFu);
+
+        joy.back(btn.components.Select);
+        joy.start(btn.components.Start);
+        joy.LB(btn.components.L1);
+        joy.RB(btn.components.R1);
+        joy.F1(btn.components.f1);
+        joy.F2(btn.components.f2);
+        joy.A(btn.components.A);
+        joy.B(btn.components.B);
+        joy.X(btn.components.X);
+        joy.Y(btn.components.Y);
+        joy.up(btn.components.up);
+        joy.down(btn.components.down);
+        joy.left(btn.components.left);
+        joy.right(btn.components.right);
+        joy.LT(btn.components.L2);
+        joy.RT(btn.components.R2);
+        joy.lx(lx);
+        joy.ly(ly);
+        joy.rx(rx);
+        joy.ry(ry);
+    }
 
     static void set_virtual_joystick(
         uint32_t keys,
@@ -114,13 +130,37 @@ public:
         float ly,
         float rx,
         float ry
-    );
+    )
+    {
+        std::lock_guard<std::mutex> lock(virtual_joystick_mutex);
 
-    static VirtualJoystick get_virtual_joystick();
-    static bool virtual_joystick_is_fresh();
+        update_unitree_joystick_from_wireless(
+            virtual_joystick,
+            keys,
+            lx,
+            ly,
+            rx,
+            ry
+        );
 
-    static bool virtual_condition_match(
-        const std::string& condition,
-        const VirtualJoystick& joy
-    );
+        virtual_joystick_stamp = std::chrono::steady_clock::now();
+    }
+
+    static unitree::common::UnitreeJoystick get_virtual_joystick()
+    {
+        std::lock_guard<std::mutex> lock(virtual_joystick_mutex);
+        return virtual_joystick;
+    }
+
+    static bool virtual_joystick_is_fresh()
+    {
+        std::lock_guard<std::mutex> lock(virtual_joystick_mutex);
+
+        const auto now = std::chrono::steady_clock::now();
+        const double age = std::chrono::duration<double>(
+            now - virtual_joystick_stamp
+        ).count();
+
+        return virtual_joystick_enabled && age < 0.3;
+    }
 };

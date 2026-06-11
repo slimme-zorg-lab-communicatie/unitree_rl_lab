@@ -7,181 +7,17 @@
 #include <mutex>
 #include <chrono>
 #include <memory>
-#include <algorithm>
 
 #include <unitree/robot/channel/channel_subscriber.hpp>
 #include <unitree/idl/go2/WirelessController_.hpp>
-
 using WirelessController_t = unitree_go::msg::dds_::WirelessController_;
 
 std::unique_ptr<LowCmd_t> FSMState::lowcmd = nullptr;
 std::shared_ptr<LowState_t> FSMState::lowstate = nullptr;
 std::shared_ptr<Keyboard> FSMState::keyboard = std::make_shared<Keyboard>();
 
-std::mutex FSMState::virtual_joystick_mutex;
-VirtualJoystick FSMState::virtual_joystick;
-std::chrono::steady_clock::time_point FSMState::virtual_joystick_stamp =
-    std::chrono::steady_clock::now() - std::chrono::seconds(10);
-bool FSMState::virtual_joystick_enabled = true;
-
 static std::shared_ptr<unitree::robot::ChannelSubscriber<WirelessController_t>>
     virtual_joystick_sub = nullptr;
-
-// Common Unitree WirelessController bit layout.
-static constexpr uint32_t BTN_R1     = 1u << 0;
-static constexpr uint32_t BTN_L1     = 1u << 1;
-static constexpr uint32_t BTN_START  = 1u << 2;
-static constexpr uint32_t BTN_SELECT = 1u << 3;
-static constexpr uint32_t BTN_R2     = 1u << 4;
-static constexpr uint32_t BTN_L2     = 1u << 5;
-static constexpr uint32_t BTN_F1     = 1u << 6;
-static constexpr uint32_t BTN_F2     = 1u << 7;
-static constexpr uint32_t BTN_A      = 1u << 8;
-static constexpr uint32_t BTN_B      = 1u << 9;
-static constexpr uint32_t BTN_X      = 1u << 10;
-static constexpr uint32_t BTN_Y      = 1u << 11;
-static constexpr uint32_t BTN_UP     = 1u << 12;
-static constexpr uint32_t BTN_RIGHT  = 1u << 13;
-static constexpr uint32_t BTN_DOWN   = 1u << 14;
-static constexpr uint32_t BTN_LEFT   = 1u << 15;
-
-static bool has_buttons(uint32_t keys, uint32_t required)
-{
-    return (keys & required) == required;
-}
-
-static std::string normalize_condition(std::string s)
-{
-    std::transform(s.begin(), s.end(), s.begin(),
-        [](unsigned char c){ return std::tolower(c); });
-
-    s.erase(
-        std::remove_if(
-            s.begin(),
-            s.end(),
-            [](unsigned char c)
-            {
-                return std::isspace(c) ||
-                       c == '[' ||
-                       c == ']' ||
-                       c == '(' ||
-                       c == ')';
-            }
-        ),
-        s.end()
-    );
-
-    return s;
-}
-
-void FSMState::set_virtual_joystick(
-    uint32_t keys,
-    float lx,
-    float ly,
-    float rx,
-    float ry
-)
-{
-    std::lock_guard<std::mutex> lock(virtual_joystick_mutex);
-
-    virtual_joystick.keys = keys;
-    virtual_joystick.lx = lx;
-    virtual_joystick.ly = ly;
-    virtual_joystick.rx = rx;
-    virtual_joystick.ry = ry;
-
-    virtual_joystick_stamp = std::chrono::steady_clock::now();
-}
-
-VirtualJoystick FSMState::get_virtual_joystick()
-{
-    std::lock_guard<std::mutex> lock(virtual_joystick_mutex);
-    return virtual_joystick;
-}
-
-bool FSMState::virtual_joystick_is_fresh()
-{
-    std::lock_guard<std::mutex> lock(virtual_joystick_mutex);
-
-    const auto now = std::chrono::steady_clock::now();
-    const double age = std::chrono::duration<double>(
-        now - virtual_joystick_stamp
-    ).count();
-
-    return virtual_joystick_enabled && age < 0.3;
-}
-
-bool FSMState::virtual_condition_match(
-    const std::string& condition,
-    const VirtualJoystick& joy
-)
-{
-    const std::string c = normalize_condition(condition);
-
-    const uint32_t keys = joy.keys;
-
-    auto down = [&](uint32_t button) {
-        return (keys & button) != 0;
-    };
-
-    auto combo = [&](uint32_t a, uint32_t b) {
-        return down(a) && down(b);
-    };
-
-    // Passive -> FixStand:
-    // LT + up.on_pressed
-    if (
-        c.find("lt") != std::string::npos &&
-        c.find("up") != std::string::npos
-    )
-    {
-        return combo(BTN_L2, BTN_UP);
-    }
-
-    // FixStand / Velocity / Mimic -> Passive:
-    // LT + B.on_pressed
-    if (
-        c.find("lt") != std::string::npos &&
-        c.find("b") != std::string::npos
-    )
-    {
-        return combo(BTN_L2, BTN_B);
-    }
-
-    // FixStand / Mimic -> Velocity:
-    // RB + X.on_pressed
-    if (
-        c.find("rb") != std::string::npos &&
-        c.find("x") != std::string::npos
-    )
-    {
-        return combo(BTN_R1, BTN_X);
-    }
-
-    // Velocity -> Mimic_Dance_102:
-    // LT(2s) + down.on_pressed
-    // Timing is ignored for now; this just checks LT + DOWN.
-    if (
-        c.find("lt") != std::string::npos &&
-        c.find("down") != std::string::npos
-    )
-    {
-        return combo(BTN_L2, BTN_DOWN);
-    }
-
-    // Velocity -> Mimic_Gangnam_Style:
-    // LT(2s) + left.on_pressed
-    // Timing is ignored for now; this just checks LT + LEFT.
-    if (
-        c.find("lt") != std::string::npos &&
-        c.find("left") != std::string::npos
-    )
-    {
-        return combo(BTN_L2, BTN_LEFT);
-    }
-
-    return false;
-}
 
 void virtual_joystick_callback(const void *message)
 {
@@ -211,6 +47,8 @@ void virtual_joystick_callback(const void *message)
 
 void start_virtual_joystick_subscriber()
 {
+    FSMState::virtual_joystick_enabled = true;
+
     virtual_joystick_sub =
         std::make_shared<unitree::robot::ChannelSubscriber<WirelessController_t>>(
             "rt/wireless_controller"
@@ -271,8 +109,7 @@ int main(int argc, char** argv)
     auto fsm = std::make_unique<CtrlFSM>(param::config["FSM"]);
     fsm->start();
 
-    std::cout << "Press [L2 + Up] to enter FixStand mode.\n";
-    std::cout << "And then press [R1 + X] to start controlling the robot.\n";
+    std::cout << "FSM transitions use button combos from config.yaml.\n";
     std::cout << "Virtual joystick subscriber active on rt/wireless_controller.\n";
 
     while (true)
